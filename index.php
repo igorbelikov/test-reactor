@@ -141,15 +141,49 @@ class DictionaryItem
      */
     public function isCombination($parser)
     {
-        $items = $parser->getPreparedSearchQuery($this->item);
+        $items = DictionaryParser::getPreparedSearchQuery($this->item);
         if (count($items) > 1) {
             foreach ($items as $item) {
-                if ($parser->dictionary->getGroupByItem($item)) {
+                $group = $parser->dictionary->getGroupByItem($item);
+                if ($group && ! strstr($this->item, $group->toString())) {
                     return true;
                 }
             }
         }
         return false;
+    }
+
+    /**
+     * @param DictionaryParser $parser
+     * @return string
+     */
+    public function prepareOperators($parser)
+    {
+        $items = DictionaryParser::getPreparedSearchQuery($this->item);
+        $condition = DictionaryParser::getCombinationByItems($items);
+
+        if (count($items) > 0) {
+            foreach ($items as $key => $item) {
+                $group = $parser->dictionary->getGroupByItem($item);
+                if ($group) {
+                    $lBracket = $key === 0 ? '(' : '';
+                    $rBracket = $key === (count($items) - 1) ? ')' : '';
+                    $operatorAnd = isset($items[$key + 1]) ? ' &' : '';
+                    $condition = str_replace($item, $lBracket . $group->toString() . $operatorAnd . $rBracket, $condition);
+                }
+            }
+            if (strstr($condition, '(') || strstr($condition, ')')) {
+                $lBracketCount = substr_count($condition, '(');
+                $rBracketCount = substr_count($condition, ')');
+                if ($lBracketCount > $rBracketCount) {
+                    $condition .= ')';
+                } else if ($rBracketCount > $lBracketCount) {
+                    $condition = '(' . $condition;
+                }
+            }
+        }
+
+        return $condition;
     }
 }
 
@@ -178,8 +212,8 @@ class DictionaryParser
      */
     public function parse($searchQuery)
     {
-        $items = $this->getPreparedSearchQuery($searchQuery);
-        $string = $this->getCombinationByItems($items);
+        $items = DictionaryParser::getPreparedSearchQuery($searchQuery);
+        $string = DictionaryParser::getCombinationByItems($items);
 
         // structure:
         //
@@ -219,45 +253,56 @@ class DictionaryParser
         // - - - 4
 
         $dictionary = $this->dictionary;
-        $this->eachItems($items, function ($combination, $wordsCount) use ($dictionary, &$string) {
+        $this->eachItems($items, function ($combination) use ($dictionary, &$string) {
             $group = $dictionary->getGroupByItem($combination);
             if ($group && ! strstr($string, $group->toString())) {
-                $replace = '& ' . $group->toString();
-                foreach ($group->items as $item) {
-                    if ($item->isCombination($this)) {
-                        $itemToReplace = '(' . str_replace(' ', ' & ', $item->item) . ')';
-                        $replace = str_replace($item->item, $itemToReplace, $replace);
-                    } else {
-                        if (strstr($item->item, ' ')) {
-                            $replace = str_replace($item->item, "\"{$item->item}\"", $replace);
-                        }
-                    }
+                $groupParse = $this->parseGroup($group);
+                $prev = $groupParse;
+                if ($groupParse === $prev) {
+                    $groupParse .= ' &';
                 }
-                $string = str_replace($combination, $replace, $string);
-            } else {
-                if ( ! strstr($combination, ' ') &&
-                     ! strstr($string, ' & ' . $combination) &&
-                     ! strstr($string, '(' . $combination)
-                ) {
-                    $string = str_replace($combination, '& ' . $combination, $string);
-                }
+                $string = str_replace($combination, $groupParse, $string);
             }
         });
 
-        $string = str_replace(' (', ' & (', $string);
-        $string = str_replace('" "', '" & "', $string);
-        $string = str_replace('& &', '&', $string);
-        $string = str_replace(['(& ', '(&'], '(', $string);
-        $string = substr($string, 2);
+        return preg_replace('/ &$/', '', $string);
+    }
 
-        return $string;
+    /**
+     * @param DictionaryGroup $group
+     * @return string
+     */
+    public function parseGroup($group)
+    {
+        $replace = $group->toString();
+        foreach ($group->items as $item) {
+            $replace = $this->parseItem($item, $replace);
+        }
+        return $replace;
+    }
+
+    /**
+     * @param DictionaryItem $item
+     * @param string $replace
+     * @return string
+     */
+    public function parseItem($item, $replace)
+    {
+        if ($item->isCombination($this)) {
+            $replace = str_replace($item->item, $item->prepareOperators($this), $replace);
+        } else {
+            if (strstr($item->item, ' ')) {
+                $replace = str_replace($item->item, "\"{$item->item}\"", $replace);
+            }
+        }
+        return $replace;
     }
 
     /**
      * @param array $items
      * @param callable $callback
      */
-    public function eachItems(array $items, callable $callback) {
+    public static function eachItems(array $items, callable $callback) {
         $count = count($items);
         for ($wordsCount = $count; $wordsCount > 0; $wordsCount--) {
             $combinations = $count - $wordsCount + 1;
@@ -283,7 +328,7 @@ class DictionaryParser
                         $end--;
                     }
                 }
-                call_user_func($callback, $this->getCombinationByItems($items, $start, $end), $wordsCount, $count, $combinations, $start, $end);
+                call_user_func($callback, DictionaryParser::getCombinationByItems($items, $start, $end), $wordsCount, $count, $combinations, $start, $end);
             }
         }
     }
@@ -292,7 +337,7 @@ class DictionaryParser
      * @param string $searchQuery
      * @return array
      */
-    public function getPreparedSearchQuery($searchQuery)
+    public static function getPreparedSearchQuery($searchQuery)
     {
         $words = explode(' ', $searchQuery);
         foreach ($words as $key => $word) {
@@ -311,7 +356,7 @@ class DictionaryParser
      * @param int $end
      * @return string
      */
-    public function getCombinationByItems(array $items, $start = -1, $end = -1)
+    public static function getCombinationByItems(array $items, $start = -1, $end = -1)
     {
         if ($start === -1) {
             return implode(' ', $items);
@@ -338,7 +383,7 @@ var_dump('(системный|системний|system & администрат
 
 foreach ($searchQueries as $index => $searchQuery) {
     echo "<hr><h3>Search query #{$index}: {$searchQuery}</h3>";
-    var_dump($parser->getPreparedSearchQuery($searchQuery));
+    var_dump(DictionaryParser::getPreparedSearchQuery($searchQuery));
 
     echo '<h3>Prepared query:</h3>';
     var_dump($parser->parse($searchQuery));
